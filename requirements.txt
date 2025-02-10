@@ -1,0 +1,16 @@
+bleak==0.21.1
+asyncio~=3.4.3
+dash~=2.17.0
+pandas~=2.0.3
+plotly~=5.22.0
+matplotlib~=3.4.3
+numpy~=1.21.2
+pandas~=2.1.4
+numpy~=1.26.4
+tensorflow[and-cuda]~=2.15.1
+keras-tuner
+matplotlib~=3.8.0
+scikit-learn~=1.4.2
+gradio~=4.38.1
+seaborn~=0.12.2
+tqdm~=4.65.0

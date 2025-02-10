@@ -1,0 +1,40 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Editor backup files
+*~
+
+# Virtual environment
+venv/
+
+# Pycharm
+.idea/
+.DS_Store
+data/*
+
+figures
+HRV_anonymized_data
+results
+HRV_our_data
+misc
+models
+bin
+lib
+share
+tuner_results
+tuner_results_old
+tuner_results_old_2
+explanations
+explanations/*
+*.pkl
+*.npy
+cinc
+etc
+pyvenv.cfg
+*.h5
+*.keras
+HRV_anonymized_data/*
+HRV_our_data/*
+.env
