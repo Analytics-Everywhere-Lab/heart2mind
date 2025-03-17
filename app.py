@@ -4,21 +4,60 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 import pandas as pd
+from sklearn.metrics.pairwise import cosine_similarity
 import tensorflow as tf
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
+from fastdtw import fastdtw
+from tensorflow_addons.layers import SpectralNormalization
+import tensorflow_addons as tfa
 
+custom_objects = {
+    "SpectralNormalization": tfa.layers.SpectralNormalization,
+    "GroupNormalization": tfa.layers.GroupNormalization,
+    "F1Score": tfa.metrics.F1Score,
+    "BinaryFocalCrossentropy": tf.keras.losses.BinaryFocalCrossentropy
+}
 
-LAYER_NAME = "multi_head_attention"  # Replace with your convolutional layer name
+TARGET_LAYERS = [
+    "bidirectional",
+    "multi_head_attention",
+]
 SEQUENCE_LENGTH = 50
 data_dir = "HRV_anonymized_data"
 explanation_dir = "explanations"
 
 # Load the pre-trained model
-model = tf.keras.models.load_model("tcam_with_mine_2.keras")
+# model = tf.keras.models.load_model("best_mstft_5.h5", custom_objects=custom_objects)
+model = tf.keras.models.load_model("tcam_with_mine.h5")
+# No grad and eval
+model.trainable = False
+model.compile()
 
 
-def expand_explanations(explanation_2d, signal_length, seq_length=50):
+def normalize_data(df):
+    data = df["RR-interval [ms]"].values
+    scaler = StandardScaler()
+    data = data.reshape(-1, 1)
+    normalized_data = scaler.fit_transform(data)
+    sequences = []
+    for i in range(len(normalized_data) - SEQUENCE_LENGTH + 1):
+        sequences.append(normalized_data[i : i + SEQUENCE_LENGTH])
+    return np.array(sequences), scaler
+
+
+def predict_class(file_path):
+    file_path = os.path.join(data_dir, file_path)
+    df = preprocess_data(file_path)
+    X_test, _ = normalize_data(df)
+    y_pred = model.predict(X_test, batch_size=1024)
+    predicted_class = np.argmax(y_pred, axis=-1)[0]
+    # predicted_class = (y_pred > 0.5).astype(int)[0][0]
+    predicted_text = "Control" if predicted_class == 0 else "Treatment"
+    return predicted_text
+
+
+def expand_explanations(explanation_2d, signal_length):
     """Expand 2D explanation (n_sequences, n_features) to match original signal length"""
     n_sequences, seq_len = explanation_2d.shape
     explanation_1d = explanation_2d.mean(axis=1)  # Aggregate features
@@ -35,9 +74,13 @@ def expand_explanations(explanation_2d, signal_length, seq_length=50):
 
     # Normalize by number of overlapping sequences and overall
     expanded = np.divide(expanded, counts, where=counts != 0)
-    expanded = (expanded - np.min(expanded)) / (
-        np.max(expanded) - np.min(expanded) + 1e-8
-    )
+    # expanded = (expanded - np.min(expanded)) / (
+    #     np.max(expanded) - np.min(expanded) + 1e-8
+    # )
+    mean_expanded = np.mean(expanded)
+    std_expanded = np.std(expanded)
+    z = (expanded - mean_expanded) / (std_expanded + 1e-8)
+    expanded = (z - np.min(z)) / (np.max(z) - np.min(z) + 1e-8)
     return expanded
 
 
@@ -51,77 +94,109 @@ def preprocess_data(file_path):
     return df
 
 
-def normalize_data(df):
-    data = df["RR-interval [ms]"].values
-    scaler = StandardScaler()
-    data = data.reshape(-1, 1)
-    normalized_data = scaler.fit_transform(data)
-    sequences = []
-    for i in range(len(normalized_data) - SEQUENCE_LENGTH + 1):
-        sequences.append(normalized_data[i : i + SEQUENCE_LENGTH])
-    return np.array(sequences), scaler
-
-
-def extract_grad_weights(model, input, layer_name, signal_length):
-    layer = model.get_layer(layer_name)
+def extract_grad_weights(model, input, signal_length):
+    """
+    Compute a gradient-based explanation from multiple layers and combine them.
+    For each layer in EXPLANATION_LAYERS, we compute the gradient-based explanation
+    (weighted by model confidence) and then average the results.
+    """
+    batch_size = 1024
     x = tf.convert_to_tensor(input, dtype=tf.float32)
-    intermediate_model = tf.keras.models.Model(
-        inputs=model.inputs, outputs=[layer.output, model.output]
-    )
-
-    # Process data in smaller batches
-    batch_size = 1024  # Set an appropriate batch size to avoid memory issues
     num_batches = int(np.ceil(x.shape[0] / batch_size))
 
-    all_layer_outputs = []
-    all_grads = []
-    pred_indices = []
+    all_layer_explanations = []  # Will store explanation maps from each layer
 
-    for batch_idx in tqdm(range(num_batches)):
-        batch_start = batch_idx * batch_size
-        batch_end = min((batch_idx + 1) * batch_size, x.shape[0])
-        batch_x = x[batch_start:batch_end]
+    # Loop over each layer to include in the explanation.
+    for layer_name in TARGET_LAYERS:
+        layer_explanations = []
+        for batch_idx in tqdm(range(num_batches), desc=f"Processing {layer_name}"):
+            batch_start = batch_idx * batch_size
+            batch_end = min((batch_idx + 1) * batch_size, x.shape[0])
+            batch_x = x[batch_start:batch_end]
 
-        with tf.GradientTape() as tape:
-            tape.watch(batch_x)
-            layer_output, predictions = intermediate_model(batch_x)
-            pred_indices = tf.argmax(predictions, axis=-1)
-            pred_indices = tf.cast(pred_indices, tf.int32)
-            indices = tf.stack([tf.range(tf.shape(predictions)[0]), pred_indices], axis=1)
-            losses = tf.gather_nd(predictions, indices)
-            loss = tf.reduce_sum(losses)
+            with tf.GradientTape() as tape:
+                tape.watch(batch_x)
+                layer = model.get_layer(layer_name)
+                intermediate_model = tf.keras.models.Model(
+                    inputs=model.inputs, outputs=[layer.output, model.output]
+                )
+                layer_output, predictions = intermediate_model(batch_x, training=False)
+                pred_indices = tf.argmax(predictions, axis=-1)
+                pred_indices = tf.cast(pred_indices, tf.int32)
+                # confidence = tf.reduce_max(predictions, axis=-1)
+                indices = tf.stack(
+                    [tf.range(tf.shape(predictions)[0]), pred_indices], axis=1
+                )
+                losses = tf.gather_nd(predictions, indices=indices)
+                loss = tf.reduce_sum(losses)
 
-        grads = tape.gradient(loss, layer_output)
-        all_layer_outputs.append(layer_output.numpy())
-        all_grads.append(grads.numpy())
-        # pred_indices.append(pred_index.numpy())
+            grads = tape.gradient(loss, layer_output)
+            # Compute per-example explanation for this batch:
+            pooled_grads = np.mean(grads.numpy(), axis=1)  # shape: (batch, features)
+            batch_explanation = np.mean(
+                layer_output.numpy() * pooled_grads[:, np.newaxis, :], axis=-1
+            )
+            batch_explanation = np.maximum(
+                batch_explanation, 0
+            )  # Keep positive gradients
+            # batch_explanation = batch_explanation * confidence.numpy()[:, None]
 
-    # Concatenate all collected data
-    all_layer_outputs = np.concatenate(all_layer_outputs, axis=0)
-    all_grads = np.concatenate(all_grads, axis=0)
+            layer_explanations.append(batch_explanation)
 
-    # Perform normalization
-    pooled_grads = np.mean(all_grads, axis=(0, 1))
-    grad_weights = np.mean(np.multiply(pooled_grads, all_layer_outputs), axis=-1)
+        # Concatenate results for this layer.
+        layer_explanations = np.concatenate(layer_explanations, axis=0)
+        all_layer_explanations.append(layer_explanations)
 
-    # Normalize the grad_weights to [0, 1]
-    grad_weights = (grad_weights - np.min(grad_weights)) / (
-        np.max(grad_weights) - np.min(grad_weights) + 1e-8
-    )
+    # Combine explanations from all layers by averaging.
+    combined_explanation = np.mean(np.stack(all_layer_explanations, axis=0), axis=0)
+    # Normalize the combined explanation to [0, 1].
+    # combined_explanation = (combined_explanation - np.min(combined_explanation)) / (
+    #     np.max(combined_explanation) - np.min(combined_explanation) + 1e-8
+    # )
+    # mean_combined_explanation = np.mean(combined_explanation)
+    # std_combined_explanation = np.std(combined_explanation)
+    # z = (combined_explanation - mean_combined_explanation) / (
+    #     std_combined_explanation + 1e-8
+    # )
+    # final_combined_explanation = (z - np.min(z)) / (np.max(z) - np.min(z) + 1e-8)
+    return expand_explanations(combined_explanation, signal_length)
 
-    return expand_explanations(grad_weights, signal_length)
 
+def extract_attention_weights(model, inputs, signal_length):
+    """
+    Compute a combined explanation from multiple layers.
+    For each layer in EXPLANATION_LAYERS, if the layer outputs attention (or
+    analogous activations), we average over the appropriate dimension and weight
+    by model confidence. The final explanation is the average of all layers.
+    """
+    all_attention_explanations = []
 
-def extract_attention_weights(model, inputs, layer_name, signal_length):
-    layer = model.get_layer(layer_name)
-    attention_model = tf.keras.Model(inputs=model.input, outputs=layer.output)
-    attention_weights = attention_model.predict(inputs)
-    attention_weights = np.mean(attention_weights, axis=-1)
-    # Normalize the attention weights to [0, 1]
-    attention_weights = (attention_weights - np.min(attention_weights)) / (
-        np.max(attention_weights) - np.min(attention_weights) + 1e-8
-    )
-    return expand_explanations(attention_weights, signal_length)
+    for layer_name in TARGET_LAYERS:
+        layer = model.get_layer(layer_name)
+        intermediate_model = tf.keras.models.Model(
+            inputs=model.input, outputs=layer.output
+        )
+        layer_output = intermediate_model(inputs, training=False)
+        # If the layer is a MultiHeadAttention, average over the head dimension.
+        layer_attention = np.mean(layer_output, axis=-1)
+
+        # Compute model confidence per example.
+        # predictions = model.predict(inputs)
+        # confidence = np.max(predictions, axis=-1)  # shape: (n_examples,)
+        # layer_attention = layer_attention * confidence[:, None]
+        # Normalize each layer's explanation.
+        # layer_attention = (layer_attention - np.min(layer_attention)) / (
+        #     np.max(layer_attention) - np.min(layer_attention) + 1e-8
+        # )
+        all_attention_explanations.append(layer_attention)
+
+    # Average the attention explanations from all layers.
+    combined_attention = np.mean(np.stack(all_attention_explanations, axis=0), axis=0)
+    # mean_combined_attention = np.mean(combined_attention)
+    # std_combined_attention = np.std(combined_attention)
+    # z = (combined_attention - mean_combined_attention) / (std_combined_attention + 1e-8)
+    # final_combined_attention = (z - np.min(z)) / (np.max(z) - np.min(z) + 1e-8)
+    return expand_explanations(combined_attention, signal_length)
 
 
 def plot_hrv(file_path):
@@ -157,28 +232,38 @@ def plot_explanation(signal, explanation, title, cmap="jet"):
     return fig
 
 
-def predict_class(file_path):
-    file_path = os.path.join(data_dir, file_path)
-    df = preprocess_data(file_path)
-    X_test, _ = normalize_data(df)
-    y_pred = model.predict(X_test)
-    predicted_class = np.argmax(y_pred, axis=-1)[0]
-    predicted_text = "Control" if predicted_class == 0 else "Treatment"
-    return predicted_text
+def dtw_alignment(attn_map, grad_map):
+    """
+    Align the attention map with the gradient map using Dynamic Time Warping (DTW).
+    Returns the aligned attention map.
+    """
+    # Ensure both maps are 1D arrays (if not, reshape them)
+    attn_map = np.array(attn_map).reshape(-1, 1)
+    grad_map = np.array(grad_map).reshape(-1, 1)
+
+    # Compute DTW distance and path
+    distance, path = fastdtw(grad_map, attn_map)
+    
+    # Re-align the attention map based on the DTW path
+    aligned_attn_map = np.zeros_like(attn_map)
+    for i, (grad_idx, attn_idx) in enumerate(path):
+        aligned_attn_map[grad_idx] = attn_map[attn_idx]
+
+    # Flatten aligned attention map to 1D for plotting
+    return aligned_attn_map.flatten()
 
 
-def plot_discrepancy(signal, attn_map, grad_map, threshold=0.5):
+def plot_discrepancy(signal, grad_map, attn_map, threshold=0.5):
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 10), sharex=True)
     time = np.arange(len(signal))
-
+    
     ax1.plot(time, attn_map, label="Attention Map", color="red")
     ax1.plot(time, grad_map, label="Gradient Map", color="green")
     ax1.set_ylabel("Explanation Intensity", fontsize=12)
+    ax1.legend()
+    print(f"Mean Attention Map: {np.mean(attn_map)}, Mean Gradient Map: {np.mean(grad_map)}")
     corr_coef = np.corrcoef(attn_map, grad_map)[0, 1]
-    if corr_coef > 0.7:
-        print(f"High correlation between explanations: {corr_coef}")
-    else:
-        print(f"Low correlation between explanations: {corr_coef}")
+    print(f"Correlation Coefficient: {corr_coef}")
     discrepancy = np.abs(attn_map - grad_map)
     mask = discrepancy > threshold
     ax2.fill_between(
@@ -202,20 +287,19 @@ def process_explanations(file_path):
     file_path = os.path.join(data_dir, file_path)
     df = preprocess_data(file_path)
     X_test, _ = normalize_data(df)
-    input_data = np.expand_dims(X_test, axis=-1)
     signal = df["RR-interval [ms]"].values
     signal_length = len(signal)
 
     # Generate explanations
-    grad_weights = extract_grad_weights(model, input_data, LAYER_NAME, signal_length)
-    attention_weights = extract_attention_weights(
-        model, X_test, LAYER_NAME, signal_length
-    )
+    grad_weights = extract_grad_weights(model, X_test, signal_length)
+    attention_weights = extract_attention_weights(model, X_test, signal_length)
+
+    aligned_attn_map = dtw_alignment(attention_weights, grad_weights)
 
     # Plots
     grad_fig = plot_explanation(signal, grad_weights, "Grad-CAM Explanation")
-    attn_fig = plot_explanation(signal, attention_weights, "Attention Explanation")
-    disc_fig = plot_discrepancy(signal, grad_weights, attention_weights)
+    attn_fig = plot_explanation(signal, aligned_attn_map, "Attention Explanation")
+    disc_fig = plot_discrepancy(signal, grad_weights, aligned_attn_map)
 
     return grad_fig, attn_fig, disc_fig
 
