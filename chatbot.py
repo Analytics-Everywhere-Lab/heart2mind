@@ -2,45 +2,18 @@ import time
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from gradio import ChatMessage
 
-# client = ChatNVIDIA(
-#     model="meta/llama-3.3-70b-instruct",
-#     api_key="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",
-#     temperature=0.2,
-#     top_p=0.7,
-#     max_tokens=4096,
-# )
-
-
-# def generate_response(history, new_message):
-#     # Append user message to the existing history
-#     updated_history = history + [{"role": "user", "content": new_message}]
-#     # Add an empty assistant message to start accumulating the response
-#     updated_history.append({"role": "assistant", "content": ""})
-
-#     # Prepare the messages for the model (exclude the empty assistant message)
-#     messages_for_model = updated_history[:-1]
-
-#     # Stream the response from the model
-#     for chunk in client.stream(messages_for_model):
-#         updated_history[-1]["content"] += chunk.content  # Accumulate chunks
-#         yield updated_history  # Yield updated history with incremental response
-
-#     return updated_history  # Return final history after streaming completes
-
 
 class PDChatbot:
-    PROMPT_TEMPLATE = """You are a helpful AI assistant in psychiatric disorder diagnosis. Always:
+    PROMPT_TEMPLATE = """You are a helpful clinical decision support AI for psychiatric disorder diagnosis. Always:
     1. Think step-by-step before responding
-    2. Validate information from multiple sources
-    3. Provide accurate and up-to-date information
-    4. Avoid making assumptions
-    5. Be empathetic and understanding
-    6. Respect user privacy and confidentiality
-    7. Provide resources for further information
-    8. Report any concerning or harmful content
-    9. Avoid providing medical advice
-    10. Cite references when applicable
-    11. Be concise and clear in your responses"""
+    2. Justify your initial assessment and the interpretation of HRV metrics, referencing clinical guidelines or evidence when possible.
+    3. When the finalization request is queried, you must finalize the decision (only answer "healthy" or "treatment") but you may overturn your prior assessment if, after reviewing all evidence, you are confident a different answer is correct. Clearly state the reason for any change.
+    4. Provide accurate, current information using clinical guidelines
+    5. Avoid assumptions. Only use the provided data
+    6. Cross-validate findings with multiple sources
+    7. Flag urgent concerns immediately
+    8. Reference sources for non-standard conclusions
+    9. Maintain clarity with very concise and straightforward responses"""
 
     def __init__(
         self, model_name, api_key, temperature=0.2, top_p=0.7, max_tokens=4096

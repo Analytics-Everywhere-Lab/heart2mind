@@ -6,7 +6,7 @@ import tensorflow as tf
 from keras_tuner import RandomSearch
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
-from tcam_model import TCAM
+from model import AdvancedHyperModel
 from utils import load_and_preprocess_data, create_sequences, normalize_sequences, patient_split, save_data, \
     load_data, get_callbacks, get_kfold
 
@@ -45,7 +45,7 @@ def train_model(X, y, patient_ids, tuner, callbacks):
                      callbacks=callbacks)
 
     top_model = tuner.get_best_models(num_models=5)[0]
-    top_model.save('tcam_with_mine.h5')
+    top_model.save('best_model.h5')
     return top_model
 
 
@@ -63,7 +63,7 @@ def main():
 
     X, y, patient_ids = load_data('data.pkl')
 
-    hypermodel = TCAM()
+    hypermodel = AdvancedHyperModel()
     tuner = RandomSearch(
         hypermodel,
         objective='val_accuracy',

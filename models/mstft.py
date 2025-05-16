@@ -14,17 +14,17 @@ class MSTFT:
         sequence_length,
         l2_weight=1e-4,
         dropout_rate=0.1,
-        num_heads=8,
-        key_dim=64,
-        project_dim=512,
-        temporal_filters=256,
+        num_heads=16,
+        key_dim=512,
+        project_dim=1024,
+        temporal_filters=1024,
         dilation_rate=3,
-        wavelet_filters=256,
+        wavelet_filters=512,
         learning_rate=1e-5,
         weight_decay=1e-5,
         num_temporal_blocks=2,
         num_freq_blocks=2,
-        expansion_factor=2,
+        expansion_factor=1,
         survival_prob=0.8,
         attention_dropout=0.1,
         ffn_dropout=0.2,
@@ -80,7 +80,8 @@ class MSTFT:
 
     def build(self):
         inputs = layers.Input(shape=(self.sequence_length, 1))
-        x = layers.GaussianNoise(stddev=0.2)(inputs)
+        x = layers.GaussianNoise(stddev=0.1)(inputs)
+
         x = self.add_positional_encoding(x)
         # --- Branch 1: Multi-Scale Temporal Convolutions ---
         x_temporal = x
@@ -120,11 +121,14 @@ class MSTFT:
                 pointwise_regularizer=tf.keras.regularizers.l2(self.l2_weight),
             )(x_freq)
 
-            x_freq = layers.BatchNormalization()(x_freq)
+            x_freq = layers.GroupNormalization(8)(x_freq)
+            x_freq = layers.Activation("gelu")(x_freq)
 
             # Adaptive frequency pooling
             if j % 2 == 0:
-                x_freq = tfa.layers.AdaptiveAveragePooling1D(x_temporal.shape[1])(x_freq)
+                x_freq = tfa.layers.AdaptiveAveragePooling1D(x_temporal.shape[1])(
+                    x_freq
+                )
 
         # --- Cross-Attention Fusion ---
         x_temporal = layers.Dense(self.project_dim)(x_temporal)
@@ -145,21 +149,26 @@ class MSTFT:
         fused = layers.LayerNormalization()(fused)
 
         # Transformer Encoder Block
-        for _ in range(2):
+        for _ in range(1):
+            # Add gating to attention
             attn = layers.MultiHeadAttention(
                 num_heads=self.num_heads,
                 key_dim=self.key_dim // self.num_heads,
                 value_dim=self.key_dim // self.num_heads,
             )(fused, fused)
-            attn = layers.Dense(self.project_dim)(attn)
-            fused = self.stochastic_skip(attn, fused)
+            gate = layers.Dense(1, activation="sigmoid")(attn)
+            attn = layers.Multiply()([attn, gate])
 
-            # Gated FFN
-            ffn = layers.Dense(fused.shape[-1] * 2, activation='gelu')(fused)
+            # Add channel-wise scaling
+            scale = tf.Variable(initial_value=0.1, trainable=True)
+            fused = fused + scale * attn  # Initialized small
+
+            # Modify FFN:
+            ffn = layers.Dense(fused.shape[-1] * 4, activation="gelu")(fused)  # Wider
+            ffn = layers.Dropout(self.ffn_dropout)(ffn)
             ffn = layers.Dense(fused.shape[-1])(ffn)
-    
-            fused = self.stochastic_skip(ffn, fused)
-            fused = layers.LayerNormalization()(fused)
+            fused = fused + ffn  # Remove stochastic depth here
+            fused = layers.LayerNormalization(epsilon=1e-6)(fused)
 
         # --- Classifier Head ---
         x = layers.Concatenate()(
@@ -167,13 +176,17 @@ class MSTFT:
         )
         x = layers.BatchNormalization()(x)
 
-        for _ in range(2):
+        for _ in range(1):
             residual = x
             x = layers.Dense(self.project_dim // 2, activation="gelu")(x)
-            x = layers.Dropout(0.3)(x)
-            residual = layers.Dense(self.project_dim // 2)(residual)
+            x = layers.Dropout(0.4)(x)
+            att = layers.Dense(x.shape[-1], activation="sigmoid")(x)
+            x = layers.Multiply()([x, att])
+            residual = layers.Dense(
+                self.project_dim // 2, kernel_initializer="he_normal"
+            )(residual)
             x = layers.Add()([x, residual])
-            x = layers.BatchNormalization()(x)
+            x = layers.GroupNormalization(8)(x)
 
         outputs = layers.Dense(1, activation="sigmoid")(x)
 

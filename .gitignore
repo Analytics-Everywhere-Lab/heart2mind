@@ -19,7 +19,8 @@ HRV_anonymized_data
 results
 HRV_our_data
 misc
-models
+models/*.h5
+models/*.pkl
 bin
 lib
 share
@@ -34,7 +35,10 @@ cinc
 etc
 pyvenv.cfg
 *.h5
+*.pdf
 *.keras
 HRV_anonymized_data/*
 HRV_our_data/*
 .env
+log
+model_architecture.png

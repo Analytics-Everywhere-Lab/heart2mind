@@ -34,7 +34,7 @@ explanation_dir = "explanations"
 
 # Load the pre-trained model
 # model = tf.keras.models.load_model("best_mstft_5.h5", custom_objects=custom_objects)
-model = tf.keras.models.load_model("tcam_with_mine.h5")
+model = tf.keras.models.load_model("models/checkpoints/tcam_with_mine.h5")
 # No grad and eval
 model.trainable = False
 model.compile()
@@ -106,57 +106,6 @@ def plot_explanation(signal, explanation, title, cmap="jet"):
     return fig
 
 
-def get_contiguous_regions(mask, gap=50):
-    """
-    Given a boolean mask and an integer gap,
-    return a list of (start_index, end_index) for each region of True values.
-    Two True segments are merged into one region if they are within 'gap' indices of each other.
-    """
-    in_region = False
-    starts, ends = [], []
-
-    for i, val in enumerate(mask):
-        if val and not in_region:
-            # Entering a region
-            starts.append(i)
-            in_region = True
-        elif not val and in_region:
-            # Leaving a region
-            ends.append(i - 1)
-            in_region = False
-
-    # If mask ended while still in a region, close it out
-    if in_region:
-        ends.append(len(mask) - 1)
-
-    # Now 'starts' and 'ends' are contiguous raw segments.
-    # We'll merge any segments that are within 'gap' of each other.
-    merged_regions = []
-    if not starts:
-        return merged_regions  # empty list
-
-    current_start = starts[0]
-    current_end = ends[0]
-
-    for idx in range(1, len(starts)):
-        next_start = starts[idx]
-        next_end = ends[idx]
-        # Check if next region is within 'gap' of current region
-        if (next_start - current_end - 1) <= gap:
-            # Merge
-            current_end = next_end
-        else:
-            # No merge; push the current region and start a new one
-            merged_regions.append((current_start, current_end))
-            current_start = next_start
-            current_end = next_end
-
-    # Add the final region
-    merged_regions.append((current_start, current_end))
-
-    return merged_regions
-
-
 def plot_figures(signal, grad_map, attn_map, threshold=0.5):
     """
     Creates and returns three separate figures:
@@ -166,7 +115,9 @@ def plot_figures(signal, grad_map, attn_map, threshold=0.5):
     """
     discrepancy = np.abs(attn_map - grad_map)
     mask = discrepancy > threshold
-    merged_regions = get_contiguous_regions(mask, gap=50)
+    merged_regions = get_contiguous_regions(
+        mask, gap=50, min_length=50, rr_signal=signal, drop_zero_metrics=True
+    )
 
     ### --- PART 1: Grad-CAM & Attention Explanation ---
     sns.set_theme(style="whitegrid")
@@ -247,13 +198,13 @@ def plot_figures(signal, grad_map, attn_map, threshold=0.5):
         ax5.axvspan(start, end, color="red", alpha=0.3)
         region_center = (start + end) / 2
         y_pos = signal.min() + (signal.max() - signal.min()) * 0.9
-        ax5.text(
-            region_center,
-            y_pos,
-            f"{region_id}",
-            horizontalalignment="center",
-            bbox=dict(facecolor="white", alpha=0.7, boxstyle="round"),
-        )
+        # ax5.text(
+        #     region_center,
+        #     y_pos,
+        #     f"{region_id}",
+        #     horizontalalignment="center",
+        #     bbox=dict(facecolor="white", alpha=0.7, boxstyle="round"),
+        # )
 
     ax5.set_xlabel("Time Index", fontsize=12)
     ax5.set_ylabel("RR-interval [ms]", fontsize=12)
@@ -265,6 +216,93 @@ def plot_figures(signal, grad_map, attn_map, threshold=0.5):
 
     # Return the three distinct figure objects
     return fig1, fig2, fig3
+
+
+def get_contiguous_regions(
+    mask,
+    gap: int = 50,
+    min_length: int = 50,
+    rr_signal=None,
+    drop_zero_metrics: bool = False,
+):
+    """
+    Return contiguous (start, end) index pairs for `True` stretches in `mask`.
+    Two stretches are merged if they are ≤ `gap` indices apart.
+    Stretches shorter than `min_length` are ignored.
+
+    Extra (optional) functionality
+    ------------------------------
+    If `drop_zero_metrics` is True **and** `rr_signal` is supplied,
+    HRV metrics are computed for every candidate region with
+    `compute_hrv_metrics`.  A region is discarded when *any* metric
+    evaluates to 0.
+
+    Parameters
+    ----------
+    mask : 1‑D boolean array
+    gap  : int – maximum allowed gap for merging
+    min_length : int – minimum accepted region length
+    rr_signal : 1‑D array‑like or None
+        The RR‑interval series that corresponds to `mask`.
+    drop_zero_metrics : bool
+        Whether to skip regions whose HRV metrics contain zeros.
+
+    Returns
+    -------
+    List[Tuple[int, int]]
+        The filtered, merged regions ready for further analysis / plotting.
+    """
+    in_region = False
+    starts, ends = [], []
+
+    # --- STEP 1: raw contiguous segments -----------------------------------
+    for i, val in enumerate(mask):
+        if val and not in_region:  # entering a region
+            starts.append(i)
+            in_region = True
+        elif not val and in_region:  # leaving a region
+            ends.append(i - 1)
+            in_region = False
+
+    if in_region:  # mask ended inside a region
+        ends.append(len(mask) - 1)
+
+    if not starts:  # nothing found
+        return []
+
+    # --- STEP 2: merge close segments --------------------------------------
+    merged_regions = []
+    current_start, current_end = starts[0], ends[0]
+
+    def _keep_region(s, e) -> bool:
+        """Return True if region [s:e] passes all length/metric checks."""
+        if (e - s + 1) < min_length:
+            return False
+        if drop_zero_metrics:
+            if rr_signal is None:
+                raise ValueError(
+                    "`rr_signal` must be provided when " "`drop_zero_metrics` is True."
+                )
+            metrics = compute_hrv_metrics(rr_signal[s : e + 1])
+            return not any(v == 0 for v in metrics.values())
+        return True
+
+    for idx in range(1, len(starts)):
+        next_start, next_end = starts[idx], ends[idx]
+
+        # merge if close enough
+        if (next_start - current_end - 1) <= gap:
+            current_end = next_end
+        else:
+            if _keep_region(current_start, current_end):
+                merged_regions.append((current_start, current_end))
+            current_start, current_end = next_start, next_end
+
+    # final candidate
+    if _keep_region(current_start, current_end):
+        merged_regions.append((current_start, current_end))
+
+    return merged_regions
 
 
 def compute_hrv_metrics(rr_signal):
@@ -357,7 +395,10 @@ def compute_hrv_in_discrepancy(rr_signal, grad_map, attn_map, threshold=0.5):
     mask = discrepancy > threshold
 
     # Find contiguous segments of True in 'mask'
-    regions = get_contiguous_regions(mask, gap=50)
+    regions = get_contiguous_regions(
+        mask, gap=50, rr_signal=rr_signal, drop_zero_metrics=True
+    )
+
     if not regions:
         # No region above threshold
         return [], mask  # return an empty list + mask
@@ -367,26 +408,22 @@ def compute_hrv_in_discrepancy(rr_signal, grad_map, attn_map, threshold=0.5):
 
     # Compute metrics for each region
     for idx, (start, end) in enumerate(regions, 1):
-        # Slice the RR-intervals for this region
         rr_roi = rr_signal[start : end + 1]
 
-        # Skip regions with insufficient data
-        if len(rr_roi) <= 1:
+        if len(rr_roi) <= 1:  # still keep this sanity guard
             continue
 
-        # Compute HRV metrics for this region
         metrics = compute_hrv_metrics(rr_roi)
 
-        # Skip regions with zero pNN50 (likely not physiologically meaningful)
-        if metrics["pNN50"] == 0.0:
-            continue
-
-        # Add region metadata
-        metrics["region_id"] = idx
-        metrics["start_idx"] = start
-        metrics["end_idx"] = end
-        metrics["pNN50"] = f"{metrics['pNN50']}%"  # Format as percentage
-
+        # No need for `if any(v == 0 ...)` here – that case was filtered out
+        metrics.update(
+            {
+                "region_id": idx,
+                "start_idx": start,
+                "end_idx": end,
+                "pNN50": f"{metrics['pNN50']}%",
+            }
+        )
         region_metrics_list.append(metrics)
 
     return region_metrics_list, mask
@@ -395,7 +432,7 @@ def compute_hrv_in_discrepancy(rr_signal, grad_map, attn_map, threshold=0.5):
 def process_explanations(file_path, chat_history, model_prediction):
     """
     Process explanations, compute HRV metrics, and update chat history.
-    
+
     Parameters:
     -----------
     file_path : str
@@ -404,54 +441,60 @@ def process_explanations(file_path, chat_history, model_prediction):
         Chat history to be updated
     model_prediction : str
         Prediction from the model
-        
+
     Returns:
     --------
     tuple
         (fig1, fig2, fig3, updated_chat_history)
-    """ 
+    """
     # Load and preprocess data
     file_path = os.path.join(data_dir, file_path)
     df = preprocess_data(file_path)
     X_test, _ = normalize_data(df)
     signal = df["RR-interval [ms]"].values
     signal_length = len(signal)
-    
+
     # Generate explanations
     grad_weights = extract_grad_weights(model, X_test, signal_length)
     attn_weights = extract_attn_weights(model, X_test, signal_length)
     aligned_attn_map = dtw_alignment(attn_weights, grad_weights)
-    
+
     # Create figures for visualization
     fig1, fig2, fig3 = plot_figures(
         signal, grad_weights, aligned_attn_map, threshold=0.5
     )
-    
+
     # Compute HRV metrics for the whole signal
     whole_signal_metrics = compute_hrv_metrics(signal)
-    
+
     # Compute HRV metrics for discrepancy regions
     region_metrics_list, mask = compute_hrv_in_discrepancy(
         signal, grad_weights, aligned_attn_map, threshold=0.5
     )
-    
+
     # First chat bubble - Model prediction and whole signal metrics
-    model_pred_text = f"Model prediction: {model_prediction}\n\n"
-    whole_signal_text = "HRV Metrics:\n"
+    model_pred_text = f"Initial AI Prediction: {model_prediction}\n\n"
+    whole_signal_text = "Baseline HRV Metrics:\n"
     whole_signal_text += f"Mean RR: {whole_signal_metrics['mean_rr']} ms, "
     whole_signal_text += f"RMSSD: {whole_signal_metrics['RMSSD']}, "
     whole_signal_text += f"SDNN: {whole_signal_metrics['SDNN']}, "
     whole_signal_text += f"pNN50: {whole_signal_metrics['pNN50']}%\n"
     whole_signal_text += f"LF Power: {whole_signal_metrics['LF_power']}, "
     whole_signal_text += f"HF Power: {whole_signal_metrics['HF_power']}"
-    
+
     # Append first bubble to chat history
-    chat_history.append({"role": "assistant", "content": whole_signal_text, "metadata": {"title": model_pred_text}})
-    
+    chat_history.append(
+        {
+            "role": "assistant",
+            "content": whole_signal_text,
+            "metadata": {"title": model_pred_text},
+        }
+    )
+
     # Second chat bubble - Discrepancy regions
     if region_metrics_list:
-        discrepancy_text = "Discrepancy Regions Detected:\n"
-        
+        discrepancy_text = "Discrepancies Detected. HRV metrics on regions:\n"
+
         # Add each region's metrics
         for region in region_metrics_list:
             discrepancy_text += (
@@ -461,11 +504,17 @@ def process_explanations(file_path, chat_history, model_prediction):
             )
     else:
         # No high-discrepancy region found
-        discrepancy_text = "No discrepancy region above threshold was found."
-    
+        discrepancy_text = "No discrepancy above threshold was found."
+
     # Append second bubble to chat history
-    chat_history.append({"role": "assistant", "content": discrepancy_text, "metadata": {"title": "Discrepancy Regions"}})
-    
+    chat_history.append(
+        {
+            "role": "assistant",
+            "content": discrepancy_text,
+            "metadata": {"title": "Regional HRV Discrepancies"},
+        }
+    )
+
     return fig1, fig2, fig3, chat_history
 
 
@@ -505,21 +554,38 @@ def main():
                     predict_output = gr.Text(label="Prediction")
             with gr.Row():
                 part1_plot = gr.Plot(
-                    label="[Heatmap] Gradient-based and Attention-based Explanations"
+                    label="[Heatmap] Gradient-based and Attention-based Explanations",
+                    show_label=False,
                 )
             with gr.Row():
                 part2_plot = gr.Plot(
-                    label="[Discrepancy] Gradient-based and Attention-based Explanations"
+                    label="[Discrepancy] Gradient-based and Attention-based Explanations",
+                    show_label=False,
                 )
             with gr.Row():
-                part3_plot = gr.Plot(label="[Diagnosis] RRI with Discrepancy Regions")
+                part3_plot = gr.Plot(
+                    label="[Diagnosis] RRI with Discrepancy Regions", show_label=False
+                )
 
         with gr.Group():
+            with gr.Row():
+                gr.Dropdown(
+                    choices=[
+                        "llama-4-maverick-instruct (7B)",
+                        "phi-4-mini-instruct (3.8B)",
+                        "gemma-3-instruct (27B)",
+                    ],
+                    label="Select a model to chat with:",
+                    interactive=True,
+                )
             with gr.Row():
                 chat_interface = gr.Chatbot(
                     type="messages",
                     value=[
-                        {"role": "assistant", "content": "Hello! I am your AI assistant to discuss results of psychiatric disorder detection."},
+                        {
+                            "role": "assistant",
+                            "content": "Hello! I am here to assist you with the psychiatric disorder detection model. You can ask me about the model decisions, HRV metrics, or any other related topic.",
+                        },
                     ],
                     show_copy_button=True,
                     show_share_button=True,
@@ -527,6 +593,7 @@ def main():
                     avatar_images=[None, "assets/bot.png"],
                     editable="user",
                     render_markdown=True,
+                    min_height=1000,
                 )
             with gr.Row(equal_height=True):
                 msg = gr.Textbox(

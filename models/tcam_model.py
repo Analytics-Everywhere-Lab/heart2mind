@@ -1,13 +1,15 @@
 from keras_tuner import HyperModel
-from tensorflow.keras.layers import Input, Conv1D, BatchNormalization, ReLU, Add, MaxPooling1D, Dense, LSTM, Dropout, \
+from keras.layers import Input, Conv1D, BatchNormalization, ReLU, Add, MaxPooling1D, Dense, LSTM, Dropout, \
     Bidirectional, LayerNormalization, MultiHeadAttention, Flatten
-from tensorflow.keras.models import Model
-from tensorflow.keras.regularizers import l2
+from keras.models import Model
+from keras.regularizers import l2
 from keras_tuner import HyperModel, HyperParameters
 
 # Define sequence length
 sequence_length = 50
-
+def initialize_base_model(hp):
+    tcam_model = TCAM.from_hyperparams(hp)
+    return tcam_model
 
 class TCAM(HyperModel):
     def __init__(self):
