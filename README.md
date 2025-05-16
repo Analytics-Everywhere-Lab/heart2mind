@@ -1,4 +1,4 @@
-# Human-centered Explainable Psychiatric Disorder Diagnosis System using Wearable ECG Monitors
+# Heart2Mind: Human-centered Contestable Psychiatric Disorder Diagnosis System using Wearable ECG Monitors
 This repository contains the code for the paper "Heart2Mind: Human-Centered Contestable Psychiatric Disorder
 Diagnosis System using Wearable ECG Monitors".
 
