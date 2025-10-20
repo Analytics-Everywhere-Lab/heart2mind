@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from tqdm import tqdm
 import tensorflow as tf
-from model import CustomModelArchitecture
+from models.network.model import CustomModelArchitecture
 from utils import get_callbacks, get_kfold
 from dataloader import prepare_data, save_data, load_data, patient_split
 

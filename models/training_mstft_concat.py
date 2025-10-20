@@ -1,10 +1,14 @@
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
 import re
 from sklearn.model_selection import KFold 
 import numpy as np
 import tensorflow as tf
 import json
 from dataloader import load_data, patient_split, prepare_data, save_data
-from models.network.mstft import MSTFT
+from models.network.mstft_concat import MSTFT_Concat
 from utils import get_callbacks
 
 # Suppress tensorflow warnings
@@ -27,7 +31,7 @@ def train_model(X, y, patient_ids, callbacks, sequence_length):
             X, y, patient_ids, train_patient_ids, val_patient_ids
         )
 
-        model_builder = MSTFT(sequence_length)
+        model_builder = MSTFT_Concat(sequence_length)
         model = model_builder.build()
         
         y_train = y_train.reshape(-1, 1)  # Shape (n_samples, 1)
@@ -93,7 +97,7 @@ def _save_data(sequence_length):
 
 
 def main():
-    sequence_length = 1000
+    sequence_length = 500
     _save_data(sequence_length)
     X, y, patient_ids = load_data(f"data_{sequence_length}.pkl")
     callbacks = get_callbacks(patience=90)

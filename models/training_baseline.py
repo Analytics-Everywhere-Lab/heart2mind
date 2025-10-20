@@ -11,7 +11,7 @@ from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_sco
 from sklearn.model_selection import KFold
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
-from baseline import LSTMHyperModel, GRUHyperModel, CNNHyperModel, TransformerHyperModel
+from models.network.baseline import LSTMHyperModel, GRUHyperModel, CNNHyperModel, TransformerHyperModel
 from utils import load_data, get_callbacks, get_kfold, patient_split
 
 warnings.filterwarnings('ignore')

@@ -1,0 +1,137 @@
+import math
+import tensorflow as tf
+from keras import layers, Model
+from tensorflow_addons.metrics import F1Score
+from keras.metrics import Precision, Recall, AUC, BinaryAccuracy
+from tensorflow_addons.layers import SpectralNormalization
+from keras.regularizers import l2
+import tensorflow_addons as tfa
+
+
+class MSTFT_Frequency:
+    """Frequency path only (no temporal branch, no cross-attention)"""
+    
+    def __init__(
+        self,
+        sequence_length,
+        l2_weight=1e-4,
+        dropout_rate=0.1,
+        num_heads=16,
+        key_dim=512,
+        project_dim=1024,
+        wavelet_filters=512,
+        learning_rate=1e-5,
+        weight_decay=1e-5,
+        num_freq_blocks=2,
+        ffn_dropout=0.2,
+    ):
+        self.sequence_length = sequence_length
+        self.l2_weight = l2_weight
+        self.dropout_rate = dropout_rate
+        self.num_heads = num_heads
+        self.key_dim = key_dim
+        self.project_dim = project_dim
+        self.wavelet_filters = wavelet_filters
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+        self.num_freq_blocks = num_freq_blocks
+        self.ffn_dropout = ffn_dropout
+
+    def add_positional_encoding(self, x):
+        x = layers.Conv1D(64, 1)(x)
+        feature_dim = x.shape[-1]
+        position = tf.range(
+            start=0, limit=self.sequence_length, delta=1, dtype=tf.float32
+        )
+        div_term = tf.exp(
+            tf.range(0, feature_dim, 2, dtype=tf.float32)
+            * -(math.log(10000.0) / feature_dim)
+        )
+        sin_part = tf.sin(tf.expand_dims(position, 1) * div_term)
+        cos_part = tf.cos(tf.expand_dims(position, 1) * div_term)
+        pos_encoding = tf.stack([sin_part, cos_part], axis=-1)
+        pos_encoding = tf.reshape(pos_encoding, [1, self.sequence_length, feature_dim])
+        return x + pos_encoding
+
+    def build(self):
+        inputs = layers.Input(shape=(self.sequence_length, 1))
+        x = layers.GaussianNoise(stddev=0.1)(inputs)
+        x = self.add_positional_encoding(x)
+
+        # --- ONLY Frequency Branch ---
+        x_freq = layers.Conv1D(64, 11, padding="same")(x)
+        for j in range(self.num_freq_blocks):
+            x_freq = layers.SeparableConv1D(
+                filters=self.wavelet_filters * (j + 1),
+                kernel_size=5,
+                depth_multiplier=2,
+                padding="same",
+                activation="gelu",
+                depthwise_regularizer=tf.keras.regularizers.l2(self.l2_weight),
+                pointwise_regularizer=tf.keras.regularizers.l2(self.l2_weight),
+            )(x_freq)
+            x_freq = layers.GroupNormalization(8)(x_freq)
+            x_freq = layers.Activation("gelu")(x_freq)
+
+        # Project to standard dimension
+        fused = layers.Dense(self.project_dim)(x_freq)
+        fused = layers.LayerNormalization()(fused)
+
+        # Transformer Encoder Block (same as original)
+        for _ in range(1):
+            attn = layers.MultiHeadAttention(
+                num_heads=self.num_heads,
+                key_dim=self.key_dim // self.num_heads,
+                value_dim=self.key_dim // self.num_heads,
+            )(fused, fused)
+            gate = layers.Dense(1, activation="sigmoid")(attn)
+            attn = layers.Multiply()([attn, gate])
+
+            scale = tf.Variable(initial_value=0.1, trainable=True)
+            fused = fused + scale * attn
+
+            ffn = layers.Dense(fused.shape[-1] * 4, activation="gelu")(fused)
+            ffn = layers.Dropout(self.ffn_dropout)(ffn)
+            ffn = layers.Dense(fused.shape[-1])(ffn)
+            fused = fused + ffn
+            fused = layers.LayerNormalization(epsilon=1e-6)(fused)
+
+        # --- Classifier Head ---
+        x = layers.Concatenate()(
+            [layers.GlobalAveragePooling1D()(fused), layers.GlobalMaxPooling1D()(fused)]
+        )
+        x = layers.BatchNormalization()(x)
+
+        for _ in range(1):
+            residual = x
+            x = layers.Dense(self.project_dim // 2, activation="gelu")(x)
+            x = layers.Dropout(0.4)(x)
+            att = layers.Dense(x.shape[-1], activation="sigmoid")(x)
+            x = layers.Multiply()([x, att])
+            residual = layers.Dense(
+                self.project_dim // 2, kernel_initializer="he_normal"
+            )(residual)
+            x = layers.Add()([x, residual])
+            x = layers.GroupNormalization(8)(x)
+
+        outputs = layers.Dense(1, activation="sigmoid")(x)
+
+        model = Model(inputs, outputs)
+        model.compile(
+            optimizer=tf.keras.optimizers.AdamW(
+                learning_rate=self.learning_rate,
+                weight_decay=self.weight_decay,
+                clipnorm=1.0,
+            ),
+            loss=tf.keras.losses.BinaryFocalCrossentropy(),
+            metrics=[
+                BinaryAccuracy(name="accuracy"),
+                Precision(name="precision"),
+                Recall(name="recall"),
+                AUC(name="auc"),
+                F1Score(
+                    num_classes=1, average="weighted", threshold=0.5, name="f1_score"
+                ),
+            ],
+        )
+        return model

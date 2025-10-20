@@ -6,7 +6,7 @@ import tensorflow as tf
 from keras_tuner import RandomSearch
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
-from model import AdvancedHyperModel
+from models.network.model import AdvancedHyperModel
 from utils import load_and_preprocess_data, create_sequences, normalize_sequences, patient_split, save_data, \
     load_data, get_callbacks, get_kfold
 
@@ -28,13 +28,11 @@ def prepare_data(data_dir, control_pattern, treatment_pattern, sequence_length):
 def train_model(X, y, patient_ids, tuner, callbacks):
     unique_patient_ids = np.unique(patient_ids)
     kfold = get_kfold()
-    best_model = None
-    best_score = 0
     for train_patient_ids, val_patient_ids in tqdm(kfold.split(unique_patient_ids), total=kfold.get_n_splits(),
                                                    desc="K-Fold Progress"):
         train_patient_ids = unique_patient_ids[train_patient_ids]
         val_patient_ids = unique_patient_ids[val_patient_ids]
-        X_train, X_val, y_train, y_val = patient_split(X, y, patient_ids, train_patient_ids, val_patient_ids)
+        X_train, _, y_train, _ = patient_split(X, y, patient_ids, train_patient_ids, val_patient_ids)
 
         X_train_tuner, X_tuner_val, y_train_tuner, y_tuner_val = train_test_split(X_train,
                                                                                   y_train,
