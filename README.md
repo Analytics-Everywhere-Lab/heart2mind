@@ -51,4 +51,11 @@ python app.py
 ## Citation
 If you find this work useful, please consider citing our paper:
 ```
+@article{nguyen2026heart2mind,
+  title={Heart2Mind: Human-Centered Contestable Psychiatric Disorder Prediction System Using Wearable ECG Monitors},
+  author={Nguyen, Hung and Rahimi, Alireza and Whitford, Veronica and Fournier, H{\'e}l{\`e}ne and Kondratova, Irina and Richard, Ren{\'e} and Cao, Hung},
+  journal={ACM Transactions on Computing for Healthcare},
+  year={2026},
+  publisher={ACM New York, NY}
+}
 ```
